@@ -16,133 +16,24 @@ from prometheus_client import start_http_server
 from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily, REGISTRY
 
 
-class ResticCollector(object):
+class ResticRepository(object):
     def __init__(
-            self, repository_url, password_file, exit_on_error, disable_check,
+            self, repository_name, repository_url, password_file, disable_check,
             disable_stats, disable_locks, include_paths, insecure_tls,
-            repository_name=None
     ):
+        self.repository_name = repository_name
         self.repository_url = repository_url
         self.password_file = password_file
-        self.exit_on_error = exit_on_error
         self.disable_check = disable_check
         self.disable_stats = disable_stats
         self.disable_locks = disable_locks
         self.include_paths = include_paths
         self.insecure_tls = insecure_tls
-        self.repository_name = repository_name
         # todo: the stats cache increases over time -> remove old ids
         # todo: cold start -> the stats cache could be saved in a persistent volume
         # todo: cold start -> the restic cache (/root/.cache/restic) could be
         # saved in a persistent volume
         self.stats_cache = {}
-        self.metrics = {}
-        self.refresh(exit_on_error)
-
-    def collect(self):
-        logging.debug("Incoming request")
-
-        repository_name_label = "repository"
-        common_label_names = [
-            repository_name_label,
-            "client_hostname",
-            "client_username",
-            "client_version",
-            "short_id",
-            "snapshot_hash",
-            "snapshot_tag",
-            "snapshot_tags",
-            "snapshot_paths",
-        ]
-
-        check_success = GaugeMetricFamily(
-            "restic_check_success",
-            "Result of restic check operation in the repository",
-            labels=[repository_name_label],
-        )
-        locks_total = CounterMetricFamily(
-            "restic_locks_total",
-            "Total number of locks in the repository",
-            labels=[repository_name_label],
-        )
-        snapshots_total = CounterMetricFamily(
-            "restic_snapshots_total",
-            "Total number of snapshots in the repository",
-            labels=[repository_name_label],
-        )
-        backup_timestamp = GaugeMetricFamily(
-            "restic_backup_timestamp",
-            "Timestamp of the last backup",
-            labels=common_label_names,
-        )
-        backup_files_total = CounterMetricFamily(
-            "restic_backup_files_total",
-            "Number of files in the backup",
-            labels=common_label_names,
-        )
-        backup_size_total = CounterMetricFamily(
-            "restic_backup_size_total",
-            "Total size of backup in bytes",
-            labels=common_label_names,
-        )
-        backup_snapshots_total = CounterMetricFamily(
-            "restic_backup_snapshots_total",
-            "Total number of snapshots",
-            labels=common_label_names,
-        )
-        scrape_duration_seconds = GaugeMetricFamily(
-            "restic_scrape_duration_seconds",
-            "Amount of time each scrape takes",
-            labels=[repository_name_label],
-        )
-
-        check_success.add_metric([self.repository_name], self.metrics["check_success"])
-        locks_total.add_metric([self.repository_name], self.metrics["locks_total"])
-        snapshots_total.add_metric([self.repository_name], self.metrics["snapshots_total"])
-
-        for client in self.metrics["clients"]:
-            common_label_values = [
-                self.repository_name,
-                client["hostname"],
-                client["username"],
-                client["version"],
-                client["short_id"],
-                client["snapshot_hash"],
-                client["snapshot_tag"],
-                client["snapshot_tags"],
-                client["snapshot_paths"],
-            ]
-
-            backup_timestamp.add_metric(common_label_values, client["timestamp"])
-            backup_files_total.add_metric(common_label_values, client["files_total"])
-            backup_size_total.add_metric(common_label_values, client["size_total"])
-            backup_snapshots_total.add_metric(
-                common_label_values, client["snapshots_total"]
-            )
-
-        scrape_duration_seconds.add_metric([self.repository_name], self.metrics["duration"])
-
-        yield check_success
-        yield locks_total
-        yield snapshots_total
-        yield backup_timestamp
-        yield backup_files_total
-        yield backup_size_total
-        yield backup_snapshots_total
-        yield scrape_duration_seconds
-
-    def refresh(self, exit_on_error=False):
-        try:
-            self.metrics = self.get_metrics()
-        except Exception:
-            logging.error(
-                "Unable to collect metrics from Restic. %s",
-                traceback.format_exc(0).replace("\n", " "),
-            )
-
-            # Shutdown exporter for any error
-            if exit_on_error:
-                sys.exit(1)
 
     def get_metrics(self):
         duration = time.time()
@@ -359,10 +250,132 @@ class ResticCollector(object):
     @staticmethod
     def parse_stderr(result):
         return (
-                result.stderr.decode("utf-8").replace("\n", " ")
-                + " Exit code: "
-                + str(result.returncode)
+            result.stderr.decode("utf-8").replace("\n", " ")
+            + " Exit code: "
+            + str(result.returncode)
         )
+
+
+class ResticCollector(object):
+    def __init__(self, repositories, exit_on_error):
+        self.repositories = repositories
+        self.exit_on_error = exit_on_error
+        self.metrics = {}
+        self.refresh(self.exit_on_error)
+
+    def collect(self):
+        logging.debug("Incoming request")
+
+        repository_name_label = "repository"
+        common_label_names = [
+            repository_name_label,
+            "client_hostname",
+            "client_username",
+            "client_version",
+            "short_id",
+            "snapshot_hash",
+            "snapshot_tag",
+            "snapshot_tags",
+            "snapshot_paths",
+        ]
+
+        check_success = GaugeMetricFamily(
+            "restic_check_success",
+            "Result of restic check operation in the repository",
+            labels=[repository_name_label],
+        )
+        locks_total = CounterMetricFamily(
+            "restic_locks_total",
+            "Total number of locks in the repository",
+            labels=[repository_name_label],
+        )
+        snapshots_total = CounterMetricFamily(
+            "restic_snapshots_total",
+            "Total number of snapshots in the repository",
+            labels=[repository_name_label],
+        )
+        backup_timestamp = GaugeMetricFamily(
+            "restic_backup_timestamp",
+            "Timestamp of the last backup",
+            labels=common_label_names,
+        )
+        backup_files_total = CounterMetricFamily(
+            "restic_backup_files_total",
+            "Number of files in the backup",
+            labels=common_label_names,
+        )
+        backup_size_total = CounterMetricFamily(
+            "restic_backup_size_total",
+            "Total size of backup in bytes",
+            labels=common_label_names,
+        )
+        backup_snapshots_total = CounterMetricFamily(
+            "restic_backup_snapshots_total",
+            "Total number of snapshots",
+            labels=common_label_names,
+        )
+        scrape_duration_seconds = GaugeMetricFamily(
+            "restic_scrape_duration_seconds",
+            "Amount of time each scrape takes",
+            labels=[repository_name_label],
+        )
+
+        for repository in self.repositories:
+            metrics = self.metrics[repository.repository_name]
+            check_success.add_metric([repository.repository_name], metrics["check_success"])
+            locks_total.add_metric([repository.repository_name], metrics["locks_total"])
+            snapshots_total.add_metric([repository.repository_name], metrics["snapshots_total"])
+
+            for client in metrics["clients"]:
+                common_label_values = [
+                    repository.repository_name,
+                    client["hostname"],
+                    client["username"],
+                    client["version"],
+                    client["short_id"],
+                    client["snapshot_hash"],
+                    client["snapshot_tag"],
+                    client["snapshot_tags"],
+                    client["snapshot_paths"],
+                ]
+
+                backup_timestamp.add_metric(common_label_values, client["timestamp"])
+                backup_files_total.add_metric(common_label_values, client["files_total"])
+                backup_size_total.add_metric(common_label_values, client["size_total"])
+                backup_snapshots_total.add_metric(
+                    common_label_values, client["snapshots_total"]
+                )
+
+            scrape_duration_seconds.add_metric([repository.repository_name], metrics["duration"])
+
+        yield check_success
+        yield locks_total
+        yield snapshots_total
+        yield backup_timestamp
+        yield backup_files_total
+        yield backup_size_total
+        yield backup_snapshots_total
+        yield scrape_duration_seconds
+
+    def refresh(self, exit_on_error=False):
+        try:
+            self.metrics = self.get_metrics()
+        except Exception:
+            logging.error(
+                "Unable to collect metrics from Restic. %s",
+                traceback.format_exc(0).replace("\n", " "),
+            )
+
+            # Shutdown exporter for any error
+            if exit_on_error:
+                sys.exit(1)
+
+    def get_metrics(self):
+        metrics = {}
+        for repository in self.repositories:
+            metrics[repository.repository_name] = repository.get_metrics()
+
+        return metrics
 
 
 if __name__ == "__main__":
@@ -446,7 +459,7 @@ if __name__ == "__main__":
             "password_file": restic_repo_password_file,
         })
 
-    collectors = []
+    repositories = []
     for repository in config["repositories"]:
         if "name" not in repository:
             logging.error("Repository from config missing mandatory name")
@@ -466,19 +479,20 @@ if __name__ == "__main__":
             with open(repo_password_file, "w") as opened_password_file:
                 opened_password_file.write(repo_password)
 
-        collector = ResticCollector(
-            repo_url,
-            repo_password_file,
-            repository.get("exit_on_error", exporter_exit_on_error),
-            repository.get("no_check", exporter_disable_check),
-            repository.get("no_stats", exporter_disable_stats),
-            repository.get("no_locks", exporter_disable_locks),
-            repository.get("include_paths", exporter_include_paths),
-            repository.get("insecure_tls", exporter_insecure_tls),
-            name,
-        )
-        collectors.append(collector)
-        REGISTRY.register(collector)
+        repositories.append(ResticRepository(
+                name,
+                repo_url,
+                repo_password_file,
+                repository.get("no_check", exporter_disable_check),
+                repository.get("no_stats", exporter_disable_stats),
+                repository.get("no_locks", exporter_disable_locks),
+                repository.get("include_paths", exporter_include_paths),
+                repository.get("insecure_tls", exporter_insecure_tls),
+        ))
+
+
+    collector = ResticCollector(repositories, exporter_exit_on_error)
+    REGISTRY.register(collector)
 
     try:
         start_http_server(exporter_port, exporter_address)
@@ -491,8 +505,7 @@ if __name__ == "__main__":
                 "Refreshing stats every {0} seconds".format(exporter_refresh_interval)
             )
             time.sleep(exporter_refresh_interval)
-            for collector in collectors:
-                collector.refresh()
+            collector.refresh()
 
     except KeyboardInterrupt:
         logging.info("\nInterrupted")
