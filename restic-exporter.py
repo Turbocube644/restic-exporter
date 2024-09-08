@@ -2,6 +2,7 @@
 import datetime
 import hashlib
 import json
+import yaml
 import logging
 import os
 import time
@@ -9,6 +10,7 @@ import re
 import subprocess
 import sys
 import traceback
+import tempfile
 
 from prometheus_client import start_http_server
 from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily, REGISTRY
@@ -16,10 +18,11 @@ from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily, REGIS
 
 class ResticCollector(object):
     def __init__(
-        self, repository, password_file, exit_on_error, disable_check,
-            disable_stats, disable_locks, include_paths, insecure_tls
+            self, repository_url, password_file, exit_on_error, disable_check,
+            disable_stats, disable_locks, include_paths, insecure_tls,
+            repository_name=None
     ):
-        self.repository = repository
+        self.repository_url = repository_url
         self.password_file = password_file
         self.exit_on_error = exit_on_error
         self.disable_check = disable_check
@@ -27,6 +30,7 @@ class ResticCollector(object):
         self.disable_locks = disable_locks
         self.include_paths = include_paths
         self.insecure_tls = insecure_tls
+        self.repository_name = repository_name
         # todo: the stats cache increases over time -> remove old ids
         # todo: cold start -> the stats cache could be saved in a persistent volume
         # todo: cold start -> the restic cache (/root/.cache/restic) could be
@@ -38,7 +42,9 @@ class ResticCollector(object):
     def collect(self):
         logging.debug("Incoming request")
 
+        repository_name_label = "repository"
         common_label_names = [
+            repository_name_label,
             "client_hostname",
             "client_username",
             "client_version",
@@ -52,17 +58,17 @@ class ResticCollector(object):
         check_success = GaugeMetricFamily(
             "restic_check_success",
             "Result of restic check operation in the repository",
-            labels=[],
+            labels=[repository_name_label],
         )
         locks_total = CounterMetricFamily(
             "restic_locks_total",
             "Total number of locks in the repository",
-            labels=[],
+            labels=[repository_name_label],
         )
         snapshots_total = CounterMetricFamily(
             "restic_snapshots_total",
             "Total number of snapshots in the repository",
-            labels=[],
+            labels=[repository_name_label],
         )
         backup_timestamp = GaugeMetricFamily(
             "restic_backup_timestamp",
@@ -87,15 +93,16 @@ class ResticCollector(object):
         scrape_duration_seconds = GaugeMetricFamily(
             "restic_scrape_duration_seconds",
             "Amount of time each scrape takes",
-            labels=[],
+            labels=[repository_name_label],
         )
 
-        check_success.add_metric([], self.metrics["check_success"])
-        locks_total.add_metric([], self.metrics["locks_total"])
-        snapshots_total.add_metric([], self.metrics["snapshots_total"])
+        check_success.add_metric([self.repository_name], self.metrics["check_success"])
+        locks_total.add_metric([self.repository_name], self.metrics["locks_total"])
+        snapshots_total.add_metric([self.repository_name], self.metrics["snapshots_total"])
 
         for client in self.metrics["clients"]:
             common_label_values = [
+                self.repository_name,
                 client["hostname"],
                 client["username"],
                 client["version"],
@@ -113,7 +120,7 @@ class ResticCollector(object):
                 common_label_values, client["snapshots_total"]
             )
 
-        scrape_duration_seconds.add_metric([], self.metrics["duration"])
+        scrape_duration_seconds.add_metric([self.repository_name], self.metrics["duration"])
 
         yield check_success
         yield locks_total
@@ -231,7 +238,7 @@ class ResticCollector(object):
         cmd = [
             "restic",
             "-r",
-            self.repository,
+            self.repository_url,
             "-p",
             self.password_file,
             "--no-lock",
@@ -267,7 +274,7 @@ class ResticCollector(object):
         cmd = [
             "restic",
             "-r",
-            self.repository,
+            self.repository_url,
             "-p",
             self.password_file,
             "--no-lock",
@@ -297,7 +304,7 @@ class ResticCollector(object):
         cmd = [
             "restic",
             "-r",
-            self.repository,
+            self.repository_url,
             "-p",
             self.password_file,
             "--no-lock",
@@ -320,7 +327,7 @@ class ResticCollector(object):
         cmd = [
             "restic",
             "-r",
-            self.repository,
+            self.repository_url,
             "-p",
             self.password_file,
             "--no-lock",
@@ -352,9 +359,9 @@ class ResticCollector(object):
     @staticmethod
     def parse_stderr(result):
         return (
-            result.stderr.decode("utf-8").replace("\n", " ")
-            + " Exit code: "
-            + str(result.returncode)
+                result.stderr.decode("utf-8").replace("\n", " ")
+                + " Exit code: "
+                + str(result.returncode)
         )
 
 
@@ -368,6 +375,46 @@ if __name__ == "__main__":
     logging.info("Starting Restic Prometheus Exporter")
     logging.info("It could take a while if the repository is remote")
 
+    exporter_address = "0.0.0.0"
+    exporter_port = 8001
+    exporter_refresh_interval = 60
+    exporter_exit_on_error = False
+    exporter_disable_check = False
+    exporter_disable_stats = False
+    exporter_disable_locks = False
+    exporter_include_paths = False
+    exporter_insecure_tls = False
+
+    try:
+        with open('config.yml', 'r') as file:
+            config = yaml.safe_load(file)
+    except IOError:
+        config = {}
+    if not "repositories" in config:
+        config["repositories"] = []
+
+    if "exporter" in config:
+        exporter_config = config["exporter"]
+        exporter_address = exporter_config.get("listen_address", exporter_address)
+        exporter_port = int(exporter_config.get("listen_port", exporter_port))
+        exporter_refresh_interval = int(exporter_config.get("refresh_interval", exporter_refresh_interval))
+        exporter_exit_on_error = bool(exporter_config.get("exit_on_error", exporter_exit_on_error))
+        exporter_disable_check = bool(exporter_config.get("no_check", exporter_disable_check))
+        exporter_disable_stats = bool(exporter_config.get("no_stats", exporter_disable_stats))
+        exporter_disable_locks = bool(exporter_config.get("no_locks", exporter_disable_locks))
+        exporter_include_paths = bool(exporter_config.get("include_paths", exporter_include_paths))
+        exporter_insecure_tls = bool(exporter_config.get("insecure_tls", exporter_insecure_tls))
+
+    exporter_address = os.environ.get("LISTEN_ADDRESS", exporter_address)
+    exporter_port = int(os.environ.get("LISTEN_PORT", exporter_port))
+    exporter_refresh_interval = int(os.environ.get("REFRESH_INTERVAL", exporter_refresh_interval))
+    exporter_exit_on_error = bool(os.environ.get("EXIT_ON_ERROR", exporter_exit_on_error))
+    exporter_disable_check = bool(os.environ.get("NO_CHECK", exporter_disable_check))
+    exporter_disable_stats = bool(os.environ.get("NO_STATS", exporter_disable_stats))
+    exporter_disable_locks = bool(os.environ.get("NO_LOCKS", exporter_disable_locks))
+    exporter_include_paths = bool(os.environ.get("INCLUDE_PATHS", exporter_include_paths))
+    exporter_insecure_tls = bool(os.environ.get("INSECURE_TLS", exporter_insecure_tls))
+
     restic_repo_url = os.environ.get("RESTIC_REPOSITORY")
     if restic_repo_url is None:
         restic_repo_url = os.environ.get("RESTIC_REPO_URL")
@@ -376,8 +423,8 @@ if __name__ == "__main__":
                 "The environment variable RESTIC_REPO_URL is deprecated, "
                 "please use RESTIC_REPOSITORY instead."
             )
-    if restic_repo_url is None:
-        logging.error("The environment variable RESTIC_REPOSITORY is mandatory")
+    if restic_repo_url is None and not config["repositories"]:
+        logging.error("Either the environment variable RESTIC_REPOSITORY or a config with repositories is mandatory ")
         sys.exit(1)
 
     restic_repo_password_file = os.environ.get("RESTIC_PASSWORD_FILE")
@@ -388,32 +435,52 @@ if __name__ == "__main__":
                 "The environment variable RESTIC_REPO_PASSWORD_FILE is deprecated, "
                 "please use RESTIC_PASSWORD_FILE instead."
             )
-    if restic_repo_password_file is None:
-        logging.error("The environment variable RESTIC_PASSWORD_FILE is mandatory")
+    if restic_repo_password_file is None and not config["repositories"]:
+        logging.error("The environment variable RESTIC_PASSWORD_FILE or a config with repositories is mandatory")
         sys.exit(1)
 
-    exporter_address = os.environ.get("LISTEN_ADDRESS", "0.0.0.0")
-    exporter_port = int(os.environ.get("LISTEN_PORT", 8001))
-    exporter_refresh_interval = int(os.environ.get("REFRESH_INTERVAL", 60))
-    exporter_exit_on_error = bool(os.environ.get("EXIT_ON_ERROR", False))
-    exporter_disable_check = bool(os.environ.get("NO_CHECK", False))
-    exporter_disable_stats = bool(os.environ.get("NO_STATS", False))
-    exporter_disable_locks = bool(os.environ.get("NO_LOCKS", False))
-    exporter_include_paths = bool(os.environ.get("INCLUDE_PATHS", False))
-    exporter_insecure_tls = bool(os.environ.get("INSECURE_TLS", False))
+    if not config["repositories"]:
+        config["repositories"].append({
+            "name": None,
+            "url": restic_repo_url,
+            "password_file": restic_repo_password_file,
+        })
+
+    collectors = []
+    for repository in config["repositories"]:
+        if "name" not in repository:
+            logging.error("Repository from config missing mandatory name")
+            sys.exit(1)
+        name = repository["name"]
+        if "url" not in repository:
+            logging.error(f"Repository {name} missing url!")
+            sys.exit(1)
+        repo_url = repository["url"]
+        repo_password_file = repository.get("password_file", None)
+        if repo_password_file is None:
+            repo_password = repository.get("password", None)
+            if repo_password is None:
+                logging.error(f"Either 'password_file' or 'password' need to be set for {name}")
+                sys.exit(1)
+            repo_password_file = os.path.join(tempfile.gettempdir(), f"restic_passwd_{name}")
+            with open(repo_password_file, "w") as opened_password_file:
+                opened_password_file.write(repo_password)
+
+        collector = ResticCollector(
+            repo_url,
+            repo_password_file,
+            repository.get("exit_on_error", exporter_exit_on_error),
+            repository.get("no_check", exporter_disable_check),
+            repository.get("no_stats", exporter_disable_stats),
+            repository.get("no_locks", exporter_disable_locks),
+            repository.get("include_paths", exporter_include_paths),
+            repository.get("insecure_tls", exporter_insecure_tls),
+            name,
+        )
+        collectors.append(collector)
+        REGISTRY.register(collector)
 
     try:
-        collector = ResticCollector(
-            restic_repo_url,
-            restic_repo_password_file,
-            exporter_exit_on_error,
-            exporter_disable_check,
-            exporter_disable_stats,
-            exporter_disable_locks,
-            exporter_include_paths,
-            exporter_insecure_tls,
-        )
-        REGISTRY.register(collector)
         start_http_server(exporter_port, exporter_address)
         logging.info(
             "Serving at http://{0}:{1}".format(exporter_address, exporter_port)
@@ -424,7 +491,8 @@ if __name__ == "__main__":
                 "Refreshing stats every {0} seconds".format(exporter_refresh_interval)
             )
             time.sleep(exporter_refresh_interval)
-            collector.refresh()
+            for collector in collectors:
+                collector.refresh()
 
     except KeyboardInterrupt:
         logging.info("\nInterrupted")

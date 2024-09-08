@@ -14,8 +14,10 @@ fi
 
 if [ -z "${RESTIC_PASSWORD}" ]; then
   if [ -z "${RESTIC_PASSWORD_FILE}" ]; then
-    echo "You have to define one of these environment variables: RESTIC_PASSWORD or RESTIC_PASSWORD_FILE"
-    exit 1
+    if [ ! -f "/config.yml" ]; then
+      echo "You have to supply a config.yml or define one of these environment variables: RESTIC_PASSWORD or RESTIC_PASSWORD_FILE"
+      exit 1
+    fi
   fi
 else
   export RESTIC_PASSWORD_FILE="/tmp/restic_passwd"
