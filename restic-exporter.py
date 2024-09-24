@@ -80,6 +80,8 @@ class ResticRepository(object):
             else:
                 stats = self.get_stats(snap["id"])
 
+            summary = snap["summary"]
+            snapshot_dirs = summary["dirs_new"] + summary["dirs_changed"] + summary["dirs_unmodified"]
             clients.append(
                 {
                     "hostname": snap["hostname"],
@@ -90,6 +92,9 @@ class ResticRepository(object):
                     "snapshot_tag": snap["tags"][0] if "tags" in snap else "",
                     "snapshot_tags": ",".join(snap["tags"]) if "tags" in snap else "",
                     "snapshot_paths": ",".join(snap["paths"]) if self.include_paths else "",
+                    "snapshot_size": summary["total_bytes_processed"],
+                    "snapshot_files_total": summary["total_files_processed"],
+                    "snapshot_dirs_total": snapshot_dirs,
                     "timestamp": snap["timestamp"],
                     "size_total": stats["total_size"],
                     "files_total": stats["total_file_count"],
@@ -314,6 +319,21 @@ class ResticCollector(object):
             "Total number of snapshots",
             labels=common_label_names,
         )
+        backup_size = CounterMetricFamily(
+            "restic_last_backup_size_total",
+            "Size of the last backup in bytes",
+            labels=common_label_names,
+        )
+        backup_files = CounterMetricFamily(
+            "restic_last_backup_files_total",
+            "File count of the last backup",
+            labels=common_label_names,
+        )
+        backup_dirs = CounterMetricFamily(
+            "restic_last_backup_dirs_total",
+            "Dir count of the last backup",
+            labels=common_label_names,
+        )
         scrape_duration_seconds = GaugeMetricFamily(
             "restic_scrape_duration_seconds",
             "Amount of time each scrape takes",
@@ -345,6 +365,9 @@ class ResticCollector(object):
                 backup_snapshots_total.add_metric(
                     common_label_values, client["snapshots_total"]
                 )
+                backup_size.add_metric(common_label_values, client["snapshot_size"])
+                backup_files.add_metric(common_label_values, client["snapshot_files_total"])
+                backup_dirs.add_metric(common_label_values, client["snapshot_dirs_total"])
 
             scrape_duration_seconds.add_metric([repository.repository_name], metrics["duration"])
 
@@ -355,6 +378,9 @@ class ResticCollector(object):
         yield backup_files_total
         yield backup_size_total
         yield backup_snapshots_total
+        yield backup_size
+        yield backup_files
+        yield backup_dirs
         yield scrape_duration_seconds
 
     def refresh(self, exit_on_error=False):
